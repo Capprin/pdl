@@ -98,6 +98,6 @@ public class WebSocketNotificationReceivedTest {
     receiver.shutdown();
 
     System.out.println("Done.");
-    return;
+    System.exit(0);
   }
 }
