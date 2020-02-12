@@ -91,7 +91,13 @@ public class WebSocketNotificationReceivedTest {
       System.out.println("Notification never received...");
     }
 
-    System.out.println("Done.");
+    System.out.println("Waiting 30 seconds to verify ping/pong");
+    Thread.sleep(30000);
 
+    sender.shutdown();
+    receiver.shutdown();
+
+    System.out.println("Done.");
+    return;
   }
 }
