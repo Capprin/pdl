@@ -160,7 +160,14 @@ public class WebSocketNotificationReceiver extends DefaultNotificationReceiver i
   @Override
   public void onReconnectFail() {
     LOGGER.log(Level.WARNING, "[" + getName() + "] failed to reconnect to socket. Retrying in one minute.");
-    //TODO: Implement reconnect
+    try {
+      Thread.sleep(60000);
+      client.connect();
+    } catch (InterruptedException ie) {
+      LOGGER.log(Level.WARNING, "[" + getName() + "] interrupted while reconnecting.");
+    } catch (Exception e) {
+      // do nothing, will be handled
+    }
   }
 
   public String getServerHost() {
