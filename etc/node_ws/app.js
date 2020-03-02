@@ -1,98 +1,98 @@
-// Defaults; configurable through environment
-const HOST = process.env.HOST || '127.0.0.1';
-const PORT = process.env.PORT || 8080;
-const SUB_PATH = process.env.SUB_PATH || '/subscribe/'
-const CLUSTER_ID = process.env.CLUSTER_ID || 'usgs'
-const CHANNEL = process.env.CHANNEL || 'anss.pdl.realtime'
-const PING_INTERVAL = process.env.PING_INTERVAL || 30000;
-const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
-
-var package = require('./package.json')
-console.log('Starting ' + package.name + ' version ' + package.version);
-
-// stan setup
+const package = require('./package.json');
 const stan = require('node-nats-streaming');
-
-// web socket setup
 const WebSocket = require('ws');
-const server = new WebSocket.Server({host:HOST, port:PORT});
+const {uuid} = require('uuidv4');
 
-// uuid
-const { uuid } = require('uuidv4');
+class Handler {
+  start(config, socket, request) {
+    const id = uuid();
+    const client_ip = request.connection.remoteAddress;
 
-console.log('Setup complete, waiting for connections...');
+    console.log('Connection opened from IP: ' + client_ip);
 
-server.on('connection', function onConnection(ws, req) {
-  console.log('Connection opened with URL ' + req.url);
-
-  // store socket-specific parameters (should be member vars?)
-  var conn;
-  var id = uuid();
-  this.isAlive = true;
-
-  // get sequence
-  var seq_pos = req.url.lastIndexOf(SUB_PATH);
-  if (seq_pos == -1) {
-    console.log('Sequence path does not exist')
-    ws.close(1008, 'Requests must be made at ' + SUB_PATH);
-    return;
-  }
-  seq_str = req.url.slice(seq_pos + SUB_PATH.length);
-  var seq = parseInt(seq_str);
-  if (seq == NaN) {
-    console.log('Sequence ' + seq_str + ' is not an integer');
-    ws.close(1003, 'Sequence ' + seq_str + ' is not a positive integer.');
-    return;
-  }
-
-  console.log('Provided sequence: ' + seq_str);
-
-  // do stan connection
-  conn = stan.connect(CLUSTER_ID, id);
-
-  console.log('Connecting to stan server with id: ' + id);
-
-  // set up connection behavior
-  conn.on('connect', function onStanConnection() {
-    console.log('Connected to stan server');
-    // connect with provided sequence
-    var opts = conn.subscriptionOptions();
-    opts.setStartAtSequence(seq);
-    // subscribe to channel
-    var subscription = conn.subscribe(CHANNEL, opts);
-
-    console.log('Subscribed to channel: ' + CHANNEL);
-
-    // define stan message behavior
-    subscription.on('message', function onStanMessage(message) {
-      // format as json
-      var json = {sequence: message.getSequence(), timestamp: message.getTimestamp(), data: JSON.parse(message.getData())};
-      if (LOG_LEVEL == 'all') console.log('Received STAN message. Payload: ' + JSON.stringify(json));
-
-      // forward notification
-      ws.send(JSON.stringify(json));
+    // define socket behavior
+    socket.isAlive = true;
+    socket.on('close', function onClose() {
+      connection.close();
+      console.log('Connection closed for client ' + client_ip);
     });
-  });
+    socket.on('pong', function onPong() {
+      socket.isAlive = true;
+      if (config.log_level == 'all') console.log('Received pong from client with ip ' + client_ip);
+    })
 
-  ws.on('close', function onClose() {
-    // close stan connection
-    conn.close();
-    console.log('Connection closed.');
-  });
+    // get sequence
+    let seq_pos = request.url.lastIndexOf(config.subscribe_path);
+    if (seq_pos == -1) {
+      console.log('Sequence path does not exist for client ' + client_ip + '; closing connection.');
+      socket.close(1008, 'Requests must be made at ' + config.subscribe_path);
+      return;
+    }
+    let seq_str = request.url.slice(seq_pos + config.subscribe_path.length);
+    let sequence = parseInt(seq_str);
+    if (sequence == NaN) {
+      console.log('Sequence' + seq_str + ' provided by ' + client_ip + ' is not an integer; closing connection.');
+      socket.close(1003, 'Sequence ' + seq_str + ' is not an integer');
+      return;
+    }
 
-  ws.on('pong', function heartbeat() {
-    ws.isAlive = true;
-    if (LOG_LEVEL == 'all') console.log('Received pong from client with id ' + id);
-  })
-});
+    // connect to nats streaming
+    console.log('Connecting to stan server for client ' + client_ip + ' with id ' + id);
+    let connection = stan.connect(config.cluster_id, id);
+    connection.on('connect', function onStanConnection() {
+      console.log('Connected to stan server for client ' + client_ip);
+      let opts = connection.subscriptionOptions();
+      opts.setStartAtSequence(sequence);
+      // subscribe to channel
+      let subscription = connection.subscribe(config.channel, opts);
 
-// periodic pings
-const interval = setInterval(function pingInterval() {
-  if (LOG_LEVEL == 'all') console.log('Pinging clients');
-  server.clients.forEach(function(ws) {
-    if (ws.isAlive === false) return ws.close(1008, 'Stale connection');
+      console.log('Client with IP ' + client_ip + ' subscribed to channel: ' + config.channel);
 
-    ws.isAlive = false;
-    ws.ping();
-  });
-}, PING_INTERVAL);
+      // define stan message behavior
+      subscription.on('message', function onStanMessage(message) {
+        // format as json
+        let json = {sequence: message.getSequence(), timestamp: message.getTimestamp(), data: JSON.parse(message.getData())};
+        if (config.log_level == 'all') console.log('Received STAN message. Payload: ' + JSON.stringify(json));
+
+        // forward notification
+        socket.send(JSON.stringify(json));
+      });
+    });
+  }
+}
+
+class App {
+  start(config) {
+    // start server
+    const server = new WebSocket.Server({host:config.host, port:config.port});
+    server.on('connection', function onConnection(socket, request) {
+      let handler = new Handler();
+      handler.start(config, socket, request);
+    });
+    console.log('Web socket hosted at ' + config.host + ':' + config.port + '.');
+
+    // start periodic pings
+    const interval = setInterval(function pingInterval() {
+      if (config.log_level == 'all') console.log('Pinging clients');
+      server.clients.forEach(function(ws) {
+        if (ws.isAlive === false) return ws.close(1008, 'Stale connection');
+        ws.isAlive = false;
+        ws.ping();
+      });
+    }, config.ping_interval);
+  }
+}
+
+const CONFIG = {
+  'host': process.env.HOST || '127.0.0.1',
+  'port': process.env.PORT || 8080,
+  'subscribe_path': process.env.SUB_PATH || '/subscribe/',
+  'cluster_id': process.env.CLUSTER_ID || 'usgs',
+  'channel': process.env.CHANNEL || 'anss.pdl.realtime',
+  'ping_interval': process.env.PING_INTERVAL || 30000,
+  'log_level': process.env.LOG_LEVEL || 'info'
+};
+
+console.log('Starting ' + package.name + ' version ' + package.version);
+const app = new App();
+app.start(CONFIG);
